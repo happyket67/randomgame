@@ -388,7 +388,7 @@
       foodAnim,
       aiMode,
       lastSwipeDir,     // Track last swipe direction
-      swipeProcessed;   // Flag to prevent duplicate processing
+      swipeLockTime;    // Timestamp to prevent rapid same-direction swipes
 
   best = parseInt(localStorage.getItem('snake-best') || '0');
   document.getElementById('best-display').textContent = best;
@@ -409,7 +409,7 @@
     particles = [];
     aiMode = isAI;
     lastSwipeDir = null;
-    swipeProcessed = false;
+    swipeLockTime = 0;
     placeFood();
     updateUI();
     updateAIMode();
@@ -475,7 +475,7 @@
 
   // ── Input queue (instant response) ─────────────────────────
   function queueDirection(newDir) {
-    // Can queue up to 3 inputs ahead for faster consecutive swipes
+    // Can queue up to 3 inputs ahead for ultra-responsive consecutive swipes
     if (inputQueue.length >= 3) return;
     
     const lastDir = inputQueue.length > 0 
@@ -486,10 +486,7 @@
     if (newDir.x === -lastDir.x && newDir.y === -lastDir.y) return;
     
     // Prevent duplicate consecutive directions
-    if (inputQueue.length > 0) {
-      const prev = inputQueue[inputQueue.length - 1];
-      if (prev.x === newDir.x && prev.y === newDir.y) return;
-    }
+    if (lastDir.x === newDir.x && lastDir.y === newDir.y) return;
     
     inputQueue.push(newDir);
   }
@@ -526,9 +523,6 @@
       if (snakePrev.length > snake.length) snakePrev.pop();
     }
     updateUI();
-    
-    // Reset swipe flag after step completes
-    swipeProcessed = false;
   }
 
   // ── Particles ──────────────────────────────────────────────
@@ -582,23 +576,43 @@
     const glowColor = aiMode ? PAL.aiGlow : PAL.snakeGlow;
     const segRadius = CELL * 0.38;
 
-    // ── Draw snake body with smooth corners ───────────────────
-    // Strategy: Draw segments as circles, then connect with rectangles
-    // At corners, draw an extra circle to fill the gap perfectly
-    
-    for (let i = snake.length - 1; i >= 0; i--) {
+    // Build interpolated positions
+    const positions = [];
+    for (let i = 0; i < snake.length; i++) {
       const cur = snake[i];
       const prev = snakePrev[i] || cur;
       const ix = prev.x + (cur.x - prev.x) * p;
       const iy = prev.y + (cur.y - prev.y) * p;
-      const cx = ix * CELL + CELL / 2;
-      const cy = iy * CELL + CELL / 2;
+      positions.push({ x: ix * CELL + CELL / 2, y: iy * CELL + CELL / 2, idx: i });
+    }
 
+    // ── Draw snake body segments with perfect corner blending ──
+    for (let i = positions.length - 1; i >= 0; i--) {
+      const pos = positions[i];
       const isHead = i === 0;
       const tVal = snake.length > 1 ? i / (snake.length - 1) : 0;
       const segColor = isHead ? headColor : lerpColor(PAL.body, PAL.bodyDim, tVal * 0.8);
 
-      // Draw segment circle
+      // Draw connecting bar to next segment (if exists)
+      if (i < positions.length - 1) {
+        const next = positions[i + 1];
+        const dx = next.x - pos.x;
+        const dy = next.y - pos.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        
+        if (dist > 0.1) {
+          const angle = Math.atan2(dy, dx);
+          
+          ctx.save();
+          ctx.translate(pos.x, pos.y);
+          ctx.rotate(angle);
+          ctx.fillStyle = segColor;
+          ctx.fillRect(0, -segRadius, dist, segRadius * 2);
+          ctx.restore();
+        }
+      }
+
+      // Draw circular segment cap (covers the joint perfectly)
       ctx.save();
       if (isHead) {
         ctx.shadowColor = headColor;
@@ -606,53 +620,9 @@
       }
       ctx.fillStyle = segColor;
       ctx.beginPath();
-      ctx.arc(cx, cy, segRadius, 0, Math.PI * 2);
+      ctx.arc(pos.x, pos.y, segRadius, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
-
-      // Connect to next segment
-      if (i < snake.length - 1) {
-        const next = snake[i + 1];
-        const prevN = snakePrev[i + 1] || next;
-        const nx = (prevN.x + (next.x - prevN.x) * p) * CELL + CELL / 2;
-        const ny = (prevN.y + (next.y - prevN.y) * p) * CELL + CELL / 2;
-
-        const dx = nx - cx;
-        const dy = ny - cy;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-
-        if (dist > 1) {
-          const angle = Math.atan2(dy, dx);
-          
-          // Draw connecting rectangle
-          ctx.save();
-          ctx.translate(cx, cy);
-          ctx.rotate(angle);
-          ctx.fillStyle = segColor;
-          ctx.fillRect(0, -segRadius, dist, segRadius * 2);
-          ctx.restore();
-
-          // Check if this is a corner (direction change)
-          // Draw extra circle at the corner to ensure smooth rounded appearance
-          if (i < snake.length - 2) {
-            const next2 = snake[i + 2];
-            const dx1 = next.x - cur.x;
-            const dy1 = next.y - cur.y;
-            const dx2 = next2.x - next.x;
-            const dy2 = next2.y - next.y;
-            
-            // If direction changed (corner detected)
-            if (dx1 !== dx2 || dy1 !== dy2) {
-              // Draw extra circle at next position to smooth the corner
-              const nextColor = lerpColor(PAL.body, PAL.bodyDim, ((i + 1) / (snake.length - 1)) * 0.8);
-              ctx.fillStyle = nextColor;
-              ctx.beginPath();
-              ctx.arc(nx, ny, segRadius, 0, Math.PI * 2);
-              ctx.fill();
-            }
-          }
-        }
-      }
 
       // Eyes on head
       if (isHead) {
@@ -665,7 +635,7 @@
         ctx.fillStyle = '#0d1117';
         [[1],[-1]].forEach(([sign]) => {
           ctx.beginPath();
-          ctx.arc(cx + ex*fwd + px*side*sign, cy + ey*fwd + py*side*sign, eyeR, 0, Math.PI*2);
+          ctx.arc(pos.x + ex*fwd + px*side*sign, pos.y + ey*fwd + py*side*sign, eyeR, 0, Math.PI*2);
           ctx.fill();
         });
       }
@@ -787,29 +757,28 @@
     }
   });
 
-  // ── Touch/Swipe with instant consecutive support ───────────
-  let touchStartX = 0, touchStartY = 0, lastTouchTime = 0;
+  // ── Touch/Swipe (instant consecutive swipes) ───────────────
+  let touchStartX = 0, touchStartY = 0, touchHasMoved = false;
 
   canvas.addEventListener('touchstart', e => {
     e.preventDefault();
     const touch = e.touches[0];
     touchStartX = touch.clientX;
     touchStartY = touch.clientY;
-    lastSwipeDir = null;
-    swipeProcessed = false;
-    lastTouchTime = performance.now();
+    touchHasMoved = false;
+    lastSwipeDir = null; // Reset on new touch
   }, { passive: false });
 
   canvas.addEventListener('touchmove', e => {
     e.preventDefault();
-    if (aiMode || swipeProcessed) return;
+    if (aiMode || touchHasMoved) return;
     
     const touch = e.touches[0];
     const dx = touch.clientX - touchStartX;
     const dy = touch.clientY - touchStartY;
     const absDx = Math.abs(dx), absDy = Math.abs(dy);
 
-    // Very low threshold for instant response (10px)
+    // Ultra-responsive: trigger on 10px threshold
     if (absDx > 10 || absDy > 10) {
       let nd;
       if (absDx > absDy) {
@@ -818,43 +787,30 @@
         nd = dy > 0 ? {x:0, y:1} : {x:0, y:-1};
       }
       
-      // Only queue if it's a different direction from last swipe
-      const dirKey = `${nd.x},${nd.y}`;
-      const lastDirKey = lastSwipeDir ? `${lastSwipeDir.x},${lastSwipeDir.y}` : null;
-      
-      if (dirKey !== lastDirKey) {
-        queueDirection(nd);
-        lastSwipeDir = nd;
-        swipeProcessed = true;
-        
-        // Reset for next swipe after a tiny delay
-        setTimeout(() => {
-          swipeProcessed = false;
-          touchStartX = touch.clientX;
-          touchStartY = touch.clientY;
-        }, 50);
-      }
+      queueDirection(nd);
+      touchHasMoved = true; // Lock until next touchstart
+      lastSwipeDir = nd;
     }
   }, { passive: false });
 
   canvas.addEventListener('touchend', e => {
     e.preventDefault();
-    lastSwipeDir = null;
-    swipeProcessed = false;
+    touchHasMoved = false;
   }, { passive: false });
 
-  // Desktop mouse swipe with same logic
-  let mouseDown = false, mouseStartX = 0, mouseStartY = 0, lastMouseSwipeDir = null;
+  // Desktop mouse swipe (instant consecutive)
+  let mouseDown = false, mouseStartX = 0, mouseStartY = 0, mouseHasMoved = false;
 
   canvas.addEventListener('mousedown', e => {
     mouseDown = true;
     mouseStartX = e.clientX;
     mouseStartY = e.clientY;
-    lastMouseSwipeDir = null;
+    mouseHasMoved = false;
+    lastSwipeDir = null;
   });
 
   canvas.addEventListener('mousemove', e => {
-    if (!mouseDown || aiMode) return;
+    if (!mouseDown || aiMode || mouseHasMoved) return;
     
     const dx = e.clientX - mouseStartX;
     const dy = e.clientY - mouseStartY;
@@ -868,21 +824,15 @@
         nd = dy > 0 ? {x:0, y:1} : {x:0, y:-1};
       }
       
-      const dirKey = `${nd.x},${nd.y}`;
-      const lastDirKey = lastMouseSwipeDir ? `${lastMouseSwipeDir.x},${lastMouseSwipeDir.y}` : null;
-      
-      if (dirKey !== lastDirKey) {
-        queueDirection(nd);
-        lastMouseSwipeDir = nd;
-        mouseStartX = e.clientX;
-        mouseStartY = e.clientY;
-      }
+      queueDirection(nd);
+      mouseHasMoved = true;
+      lastSwipeDir = nd;
     }
   });
 
   canvas.addEventListener('mouseup', () => { 
-    mouseDown = false;
-    lastMouseSwipeDir = null;
+    mouseDown = false; 
+    mouseHasMoved = false;
   });
 
   // ── D-pad (instant via queue) ──────────────────────────────
